@@ -3,10 +3,12 @@ import {
   TextContainerProperty,
   ImageContainerProperty,
   TextContainerUpgrade,
+  ImageRawDataUpdate,
   CreateStartUpPageContainer,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { startMidi, midiNoteName } from './midi'
+import { renderStaffBitmap } from './staff'
 
 // HUD canvas: 576 x 288, 4-bit greyscale. Image containers are capped at
 // 200 x 100 by the docs (looser limits in the .d.ts are not safe).
@@ -71,6 +73,18 @@ const result = await bridge.createStartUpPageContainer(
 )
 
 console.log('Page created:', result === 0 ? 'success' : `failed (${result})`)
+
+// Push the static staff bitmap once. updateImageRawData cannot run during
+// page creation, so it has to happen after createStartUpPageContainer resolves.
+const staffBytes = await renderStaffBitmap()
+const staffPushResult = await bridge.updateImageRawData(
+  new ImageRawDataUpdate({
+    containerID: STAFF_IMG_ID,
+    containerName: 'staff',
+    imageData: staffBytes,
+  }),
+)
+console.log('Staff bitmap pushed:', staffPushResult)
 
 // Currently-pressed MIDI note numbers. Re-rendered on every change.
 const activeNotes = new Set<number>()
