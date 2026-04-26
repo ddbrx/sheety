@@ -4,8 +4,13 @@ import {
   CreateStartUpPageContainer,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
+import { startMidi } from './midi'
 
 const bridge = await waitForEvenAppBridge()
+
+// MIDI input is independent of the HUD bridge; start it in parallel and just
+// log events for now. Subsequent steps will route notes to the display.
+void startMidi(() => {})
 
 const mainText = new TextContainerProperty({
   xPosition: 0,
