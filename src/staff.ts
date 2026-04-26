@@ -110,6 +110,19 @@ function drawNotehead(ctx: CanvasRenderingContext2D, x: number, y: number): void
   ctx.fill()
 }
 
+function drawSharp(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+  ctx.fillStyle = '#ffffff'
+  ctx.font = '16px "Apple Symbols", "Bravura", "Noto Music", serif'
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
+  ctx.fillText('♯', x, y + 1)
+}
+
+function isBlackKey(midi: number): boolean {
+  const pc = ((midi % 12) + 12) % 12
+  return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10
+}
+
 export async function renderStaffBitmap(activeNotes: ReadonlySet<number> = new Set()): Promise<Uint8Array> {
   const canvas = makeCanvas()
   const ctx = canvas.getContext('2d')
@@ -130,7 +143,9 @@ export async function renderStaffBitmap(activeNotes: ReadonlySet<number> = new S
 
   for (const midi of activeNotes) {
     const step = midiToStaffStep(midi)
-    drawNotehead(ctx, NOTEHEAD_X, staffStepY(step))
+    const y = staffStepY(step)
+    drawNotehead(ctx, NOTEHEAD_X, y)
+    if (isBlackKey(midi)) drawSharp(ctx, NOTEHEAD_X - 13, y)
   }
 
   return canvasToPngBytes(canvas)
