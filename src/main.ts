@@ -1,160 +1,84 @@
 import {
   waitForEvenAppBridge,
   TextContainerProperty,
-  ImageContainerProperty,
   TextContainerUpgrade,
-  ImageRawDataUpdate,
   CreateStartUpPageContainer,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { startMidi, midiNoteName } from './midi'
-import { renderStaffBitmap } from './staff'
-
-// HUD canvas: 576 x 288, 4-bit greyscale. Image containers are capped at
-// 200 x 100 by the docs (looser limits in the .d.ts are not safe).
-const HUD_W = 576
-const HUD_H = 288
-const STAFF_W = 200
-const STAFF_H = 100
-const STAFF_X = Math.floor((HUD_W - STAFF_W) / 2)
-const STAFF_Y = 40
-
-const EVENT_LAYER_ID = 1
-const NOTE_TEXT_ID = 2
-const STAFF_IMG_ID = 3
 
 const bridge = await waitForEvenAppBridge()
 
-// Full-screen transparent text container. Image containers can't capture
-// events, so this layer absorbs taps (including double-tap-to-exit).
-const eventLayer = new TextContainerProperty({
+const MAIN_ID = 1
+
+const mainText = new TextContainerProperty({
   xPosition: 0,
   yPosition: 0,
-  width: HUD_W,
-  height: HUD_H,
+  width: 576,
+  height: 288,
   borderWidth: 0,
-  borderColor: 0,
-  paddingLength: 0,
-  containerID: EVENT_LAYER_ID,
-  containerName: 'events',
-  content: ' ',
-  isEventCapture: 1,
-})
-
-const noteText = new TextContainerProperty({
-  xPosition: 0,
-  yPosition: STAFF_Y + STAFF_H + 20,
-  width: HUD_W,
-  height: 60,
-  borderWidth: 0,
-  borderColor: 0,
+  borderColor: 5,
   paddingLength: 4,
-  containerID: NOTE_TEXT_ID,
-  containerName: 'notes',
-  content: '—',
-  isEventCapture: 0,
-})
-
-const staffImage = new ImageContainerProperty({
-  xPosition: STAFF_X,
-  yPosition: STAFF_Y,
-  width: STAFF_W,
-  height: STAFF_H,
-  containerID: STAFF_IMG_ID,
-  containerName: 'staff',
+  containerID: MAIN_ID,
+  containerName: 'main',
+  content: 'MIDI: waiting...\nDouble-tap to exit.',
+  isEventCapture: 1,
 })
 
 const result = await bridge.createStartUpPageContainer(
   new CreateStartUpPageContainer({
-    containerTotalNum: 3,
-    textObject: [eventLayer, noteText],
-    imageObject: [staffImage],
+    containerTotalNum: 1,
+    textObject: [mainText],
   }),
 )
-
-console.log('Page created:', result === 0 ? 'success' : `failed (${result})`)
-
-// Currently-pressed MIDI note numbers. Re-rendered on every change.
-const activeNotes = new Set<number>()
-
-function renderNoteText(): string {
-  if (activeNotes.size === 0) return '—'
-  return [...activeNotes].sort((a, b) => a - b).map(midiNoteName).join(', ')
+if (result !== 0) {
+  console.error('createStartUpPageContainer failed:', result)
+} else {
+  console.log('Page created: success')
 }
 
-// Coalesce concurrent text pushes: if one is already in flight, mark dirty
-// and let the running loop pick up the latest content when it returns.
+// Coalesced text push — at most one in flight; trailing render wins.
 let textInFlight = false
-let textDirty = false
+let pendingText: string | null = null
 
-async function pushNoteText(): Promise<void> {
-  textDirty = true
+async function setText(content: string): Promise<void> {
+  pendingText = content
   if (textInFlight) return
   textInFlight = true
   try {
-    while (textDirty) {
-      textDirty = false
-      const content = renderNoteText()
-      await bridge.textContainerUpgrade(
+    while (pendingText !== null) {
+      const next = pendingText
+      pendingText = null
+      const ok = await bridge.textContainerUpgrade(
         new TextContainerUpgrade({
-          containerID: NOTE_TEXT_ID,
-          contentOffset: 0,
-          contentLength: content.length,
-          content,
+          containerID: MAIN_ID,
+          containerName: 'main',
+          content: next,
         }),
       )
+      console.log(`[hud] textContainerUpgrade -> ${ok}`)
     }
   } finally {
     textInFlight = false
   }
 }
 
-// Same coalescing pattern as text: at most one image push in flight; the
-// trailing render always reflects the latest active-notes set. Image
-// uploads can be 0.5-2s each over BLE per the SDK docs, so dropping
-// intermediate frames matters more here than for text.
-let imgInFlight = false
-let imgDirty = true // start dirty so the first push happens
-
-async function pushStaff(): Promise<void> {
-  imgDirty = true
-  if (imgInFlight) return
-  imgInFlight = true
-  try {
-    while (imgDirty) {
-      imgDirty = false
-      const bytes = await renderStaffBitmap(activeNotes)
-      await bridge.updateImageRawData(
-        new ImageRawDataUpdate({
-          containerID: STAFF_IMG_ID,
-          containerName: 'staff',
-          imageData: bytes,
-        }),
-      )
-    }
-  } finally {
-    imgInFlight = false
-  }
-}
-
-// Initial render: empty staff (lines + clef, no noteheads).
-void pushStaff()
+const held = new Set<number>()
 
 void startMidi(event => {
-  if (event.type === 'on') activeNotes.add(event.midi)
-  else activeNotes.delete(event.midi)
-  void pushNoteText()
-  void pushStaff()
+  if (event.type === 'on') held.add(event.midi)
+  else held.delete(event.midi)
+
+  const last = `${midiNoteName(event.midi)} ${event.type}`
+  const heldList =
+    held.size === 0 ? '(none)' : [...held].sort((a, b) => a - b).map(midiNoteName).join(', ')
+  void setText(`Last: ${last}\nHeld: ${heldList}\nDouble-tap to exit.`)
+}).then(() => {
+  // startMidi resolves whether or not MIDI is actually available; if no inputs
+  // were attached the user just sees the "waiting" message until they connect.
+  console.log('[midi] startMidi resolved')
 })
 
-// Event routing, critical details:
-//   • Protobuf omits zero-value fields on the wire, so CLICK_EVENT (0)
-//     arrives as `undefined`. Always coalesce with `?? 0` before comparing.
-//   • Taps/double-taps/lifecycle come through `event.sysEvent`.
-//     Scroll gestures come through `event.textEvent`. Never mix them.
-//   • Double-tap → `shutDownPageContainer(1)` is a root-level check: it
-//     must fire no matter which envelope the event arrives in, so users
-//     can always exit the app.
 const unsubscribe = bridge.onEvenHubEvent(event => {
   const sysType = event.sysEvent?.eventType ?? null
   const textType = event.textEvent?.eventType ?? null

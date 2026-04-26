@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -n vite,midi -c blue,green \"vite --host 0.0.0.0\" \"node scripts/midi-bridge.mjs\"",
+    "dev:vite": "vite --host 0.0.0.0",
+    "dev:midi": "node scripts/midi-bridge.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "pack": "evenhub pack",
@@ -16,7 +18,10 @@
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.12",
     "@evenrealities/evenhub-simulator": "^0.7.2",
+    "concurrently": "^9.2.1",
+    "easymidi": "^3.2.0",
     "typescript": "^5.7.0",
-    "vite": "^5.4.0"
+    "vite": "^5.4.0",
+    "ws": "^8.20.0"
   }
 }
