@@ -74,18 +74,6 @@ const result = await bridge.createStartUpPageContainer(
 
 console.log('Page created:', result === 0 ? 'success' : `failed (${result})`)
 
-// Push the static staff bitmap once. updateImageRawData cannot run during
-// page creation, so it has to happen after createStartUpPageContainer resolves.
-const staffBytes = await renderStaffBitmap()
-const staffPushResult = await bridge.updateImageRawData(
-  new ImageRawDataUpdate({
-    containerID: STAFF_IMG_ID,
-    containerName: 'staff',
-    imageData: staffBytes,
-  }),
-)
-console.log('Staff bitmap pushed:', staffPushResult)
-
 // Currently-pressed MIDI note numbers. Re-rendered on every change.
 const activeNotes = new Set<number>()
 
@@ -121,10 +109,42 @@ async function pushNoteText(): Promise<void> {
   }
 }
 
+// Same coalescing pattern as text: at most one image push in flight; the
+// trailing render always reflects the latest active-notes set. Image
+// uploads can be 0.5-2s each over BLE per the SDK docs, so dropping
+// intermediate frames matters more here than for text.
+let imgInFlight = false
+let imgDirty = true // start dirty so the first push happens
+
+async function pushStaff(): Promise<void> {
+  imgDirty = true
+  if (imgInFlight) return
+  imgInFlight = true
+  try {
+    while (imgDirty) {
+      imgDirty = false
+      const bytes = await renderStaffBitmap(activeNotes)
+      await bridge.updateImageRawData(
+        new ImageRawDataUpdate({
+          containerID: STAFF_IMG_ID,
+          containerName: 'staff',
+          imageData: bytes,
+        }),
+      )
+    }
+  } finally {
+    imgInFlight = false
+  }
+}
+
+// Initial render: empty staff (lines + clef, no noteheads).
+void pushStaff()
+
 void startMidi(event => {
   if (event.type === 'on') activeNotes.add(event.midi)
   else activeNotes.delete(event.midi)
   void pushNoteText()
+  void pushStaff()
 })
 
 // Event routing, critical details:
