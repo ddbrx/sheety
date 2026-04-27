@@ -105,7 +105,9 @@ const anthropic = new Anthropic() // reads ANTHROPIC_API_KEY
 // if the prompt grows later.
 const SYSTEM_PROMPT = `You are a concise piano teacher. The student attempted a passage on a digital piano; you receive what they were supposed to play and what they actually played (with timestamps).
 
-Reply with ONE short sentence (max 110 characters) judging the attempt. Be specific (mention a note or pattern when useful), encouraging but direct. The output appears on a tiny smart-glasses HUD — no preamble, no markdown, no quotation marks, no trailing newline.`
+Judge PLAYING QUALITY only — rhythm, timing, evenness, melodic contour relative to itself, hesitations, dropped or duplicated notes, chord accuracy. Do NOT comment on key, scale, or transposition. If the student played the piece transposed to a different key, treat that as fine and ignore it: compare the SHAPE of what they played (intervals between successive notes, beat positions) to the SHAPE of the expected sequence, not the absolute pitch class. Never tell them to "transpose up/down" or "play in X major" — assume the choice of key is intentional.
+
+Reply with ONE short sentence (max 110 characters), specific (call out a beat or a pattern when useful), encouraging but direct. The output appears on a tiny smart-glasses HUD — no preamble, no markdown, no quotation marks, no trailing newline.`
 
 function formatEvalPrompt({ mode, played, expected }) {
   const onNotes = (played ?? []).filter(p => p && p.type === 'on')
