@@ -1,24 +1,67 @@
-// Off-screen canvas renderer for the treble-clef staff. Produces PNG bytes
-// for ImageRawDataUpdate; the SDK handles greyscale conversion on the device.
+// Off-screen canvas renderer for a single five-line staff (treble or bass).
+// Produces PNG bytes for ImageRawDataUpdate; the SDK handles 4-bit greyscale
+// conversion on the device.
 
-export const STAFF_W = 200
+// Full logical staff width — covers nearly the whole HUD when tiled across
+// two image containers (the per-container width caps at 288 per the SDK type
+// defs, so a single container can't span the full 576 px display).
+export const STAFF_W = 560
 export const STAFF_H = 100
+export const STAFF_HALF_W = STAFF_W / 2
+
+export type Clef = 'treble' | 'bass'
+
+interface ClefConfig {
+  /** Unicode glyph for the clef. */
+  glyph: string
+  /** MIDI note that sits on the *bottom* line of the staff. */
+  bottomLineMidi: number
+  /** Canvas font sizing for the clef glyph. */
+  font: string
+  /**
+   * Which staff line the glyph's reference point should target, indexed
+   * 0 = top line. Treble's G-clef swirl wraps the G4 line (3 from top);
+   * bass's F-clef dots straddle the F3 line (1 from top).
+   */
+  anchorLineFromTop: number
+  /** Pixel fine-tune applied on top of the anchor line. */
+  fineTuneY: number
+}
+
+const CLEFS: Record<Clef, ClefConfig> = {
+  treble: {
+    glyph: '\u{1D11E}', // 𝄞 G clef
+    bottomLineMidi: 64, // E4
+    font: '60px "Apple Symbols", "Noto Music", "Bravura", serif',
+    anchorLineFromTop: 3, // G4 line — swirl center
+    fineTuneY: 8, // Apple Symbols draws this glyph above the alphabetic baseline
+  },
+  bass: {
+    glyph: '\u{1D122}', // 𝄢 F clef
+    bottomLineMidi: 43, // G2
+    font: '48px "Apple Symbols", "Noto Music", "Bravura", serif',
+    anchorLineFromTop: 1, // F3 line — dots straddle this
+    fineTuneY: 14,
+  },
+}
 
 // Five staff lines, spaced 10px, centred vertically with room for ledger lines.
-const STAFF_TOP_Y = 30 // y of top line (F5)
+const STAFF_TOP_Y = 30 // y of top line (F5 in treble / A3 in bass)
 const STAFF_LINE_GAP = 10
-const STAFF_BOTTOM_Y = STAFF_TOP_Y + STAFF_LINE_GAP * 4 // y of bottom line (E4)
-const STAFF_LEFT = 26
-const STAFF_RIGHT = STAFF_W - 6
-const NOTEHEAD_X = 88
+const STAFF_BOTTOM_Y = STAFF_TOP_Y + STAFF_LINE_GAP * 4 // y of bottom line (E4 in treble / G2 in bass)
+// Lines start to the right of the clef so the clef is unambiguously on top
+// (no visible line strokes underneath the glyph). The clef is rendered first
+// in clef-only space, lines start at STAFF_LEFT, and noteheads sit further right.
+// CONNECT_X is the x-column of the vertical line that visually joins the two
+// staves; sits just inside the left edge, before the clef glyph.
+const CONNECT_X = 2
+const CLEF_X = 6
+const STAFF_LEFT = 56
+const STAFF_RIGHT = STAFF_W - 8
+const NOTEHEAD_X = 120
 
 // Each diatonic step is half a line gap.
 const STEP_PX = STAFF_LINE_GAP / 2
-
-// Reference: E4 (MIDI 64) sits on the bottom staff line. We give it
-// "staff step 0"; positive steps go up, negative go down (each step = one
-// diatonic position, e.g. C4 → -2).
-const E4_DIATONIC = midiToDiatonic(64)
 
 // Map pitch class -> diatonic offset within the octave. Black keys snap
 // to the white key BELOW (per the brief); accidentals are layered on later.
@@ -43,8 +86,9 @@ function midiToDiatonic(midi: number): number {
   return octave * 7 + PC_TO_DIATONIC[pc]
 }
 
-export function midiToStaffStep(midi: number): number {
-  return midiToDiatonic(midi) - E4_DIATONIC
+// Step 0 = bottom line of the chosen clef's staff. Positive steps go up.
+export function midiToStaffStep(midi: number, clef: Clef): number {
+  return midiToDiatonic(midi) - midiToDiatonic(CLEFS[clef].bottomLineMidi)
 }
 
 function staffStepY(step: number): number {
@@ -85,12 +129,35 @@ function drawStaffLines(ctx: CanvasRenderingContext2D): void {
   }
 }
 
-function drawTrebleClef(ctx: CanvasRenderingContext2D): void {
+// Vertical line on the left that visually connects the treble and bass
+// staves into a grand staff. Each bitmap draws its half of the line; in the
+// HUD the bitmaps overlap slightly so the two halves form one continuous
+// stroke from the treble's top line down to the bass's bottom line.
+function drawConnectingLine(ctx: CanvasRenderingContext2D, clef: Clef): void {
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 2
+  const x = CONNECT_X + 0.5
+  // Treble: from its top staff line down to the bottom of the bitmap.
+  // Bass:  from the top of the bitmap down to its bottom staff line.
+  const y0 = clef === 'treble' ? STAFF_TOP_Y : 0
+  const y1 = clef === 'treble' ? STAFF_H : STAFF_BOTTOM_Y
+  ctx.beginPath()
+  ctx.moveTo(x, y0)
+  ctx.lineTo(x, y1)
+  ctx.stroke()
+}
+
+function drawClef(ctx: CanvasRenderingContext2D, clef: Clef): void {
+  const cfg = CLEFS[clef]
   ctx.fillStyle = '#ffffff'
-  ctx.font = '64px "Apple Symbols", "Noto Music", "Bravura", serif'
-  ctx.textBaseline = 'middle'
+  ctx.font = cfg.font
+  // Alphabetic baseline targets the clef's identifying line directly:
+  // SMuFL convention puts the G-clef baseline on the G line and the F-clef
+  // baseline on the F line. Apple Symbols follows this for its music glyphs.
+  ctx.textBaseline = 'alphabetic'
   ctx.textAlign = 'left'
-  ctx.fillText('\u{1D11E}', 2, (STAFF_TOP_Y + STAFF_BOTTOM_Y) / 2 + 2)
+  const anchorY = STAFF_TOP_Y + cfg.anchorLineFromTop * STAFF_LINE_GAP
+  ctx.fillText(cfg.glyph, CLEF_X, anchorY + cfg.fineTuneY)
 }
 
 function drawLedgerLine(ctx: CanvasRenderingContext2D, x: number, step: number): void {
@@ -123,7 +190,10 @@ function isBlackKey(midi: number): boolean {
   return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10
 }
 
-export async function renderStaffBitmap(activeNotes: ReadonlySet<number> = new Set()): Promise<Uint8Array> {
+async function renderFullStaff(
+  clef: Clef,
+  activeNotes: ReadonlySet<number>,
+): Promise<HTMLCanvasElement> {
   const canvas = makeCanvas()
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Failed to acquire 2D context')
@@ -132,23 +202,53 @@ export async function renderStaffBitmap(activeNotes: ReadonlySet<number> = new S
   ctx.fillRect(0, 0, STAFF_W, STAFF_H)
 
   drawStaffLines(ctx)
-  drawTrebleClef(ctx)
+  drawConnectingLine(ctx, clef)
+  drawClef(ctx, clef)
 
-  // Dedupe ledger lines across the chord, then draw them once each.
   const ledgerSet = new Set<number>()
   for (const midi of activeNotes) {
-    for (const ls of ledgerLinesFor(midiToStaffStep(midi))) ledgerSet.add(ls)
+    for (const ls of ledgerLinesFor(midiToStaffStep(midi, clef))) ledgerSet.add(ls)
   }
   for (const step of ledgerSet) drawLedgerLine(ctx, NOTEHEAD_X, step)
 
   for (const midi of activeNotes) {
-    const step = midiToStaffStep(midi)
+    const step = midiToStaffStep(midi, clef)
     const y = staffStepY(step)
     drawNotehead(ctx, NOTEHEAD_X, y)
     if (isBlackKey(midi)) drawSharp(ctx, NOTEHEAD_X - 13, y)
   }
 
-  return canvasToPngBytes(canvas)
+  return canvas
+}
+
+// Renders the full-width staff and slices it into left/right halves so the
+// caller can push each half into its own image container. Returns PNG bytes
+// because that's what updateImageRawData consumes.
+export async function renderStaffHalves(
+  clef: Clef,
+  activeNotes: ReadonlySet<number> = new Set(),
+): Promise<{ left: Uint8Array; right: Uint8Array }> {
+  const full = await renderFullStaff(clef, activeNotes)
+  return {
+    left: await sliceToPng(full, 0, 0, STAFF_HALF_W, STAFF_H),
+    right: await sliceToPng(full, STAFF_HALF_W, 0, STAFF_HALF_W, STAFF_H),
+  }
+}
+
+async function sliceToPng(
+  source: HTMLCanvasElement,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+): Promise<Uint8Array> {
+  const c = document.createElement('canvas')
+  c.width = sw
+  c.height = sh
+  const ctx = c.getContext('2d')
+  if (!ctx) throw new Error('Failed to acquire 2D context for slice')
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh)
+  return canvasToPngBytes(c)
 }
 
 function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
