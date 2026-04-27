@@ -235,6 +235,23 @@ export async function renderStaffHalves(
   }
 }
 
+// All-black PNG of half-staff dimensions. Cached after first call so mode
+// switches don't re-encode it. On hardware, black pixels are off, so this
+// effectively clears whatever was previously displayed in the container.
+let cachedBlankBytes: Uint8Array | null = null
+export async function renderBlankHalfBitmap(): Promise<Uint8Array> {
+  if (cachedBlankBytes) return cachedBlankBytes
+  const c = document.createElement('canvas')
+  c.width = STAFF_HALF_W
+  c.height = STAFF_H
+  const ctx = c.getContext('2d')
+  if (!ctx) throw new Error('Failed to acquire 2D context for blank bitmap')
+  ctx.fillStyle = '#000000'
+  ctx.fillRect(0, 0, STAFF_HALF_W, STAFF_H)
+  cachedBlankBytes = await canvasToPngBytes(c)
+  return cachedBlankBytes
+}
+
 async function sliceToPng(
   source: HTMLCanvasElement,
   sx: number,

@@ -8,7 +8,7 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { startMidi, midiNoteName } from './midi'
-import { renderStaffHalves, STAFF_HALF_W, STAFF_H, type Clef } from './staff'
+import { renderStaffHalves, renderBlankHalfBitmap, STAFF_HALF_W, STAFF_H, type Clef } from './staff'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -101,6 +101,29 @@ async function setText(content: string): Promise<void> {
 
 const held = new Set<number>()
 
+type Mode = 'free-play' | 'exercises' | 'pieces'
+const MODES: readonly Mode[] = ['free-play', 'exercises', 'pieces'] as const
+const MODE_LABELS: Record<Mode, string> = {
+  'free-play': 'Free play',
+  exercises: 'Exercises',
+  pieces: 'Pieces',
+}
+let mode: Mode = 'free-play'
+
+function cycleMode(direction: 'up' | 'down'): void {
+  const i = MODES.indexOf(mode)
+  const next =
+    direction === 'down'
+      ? MODES[(i + 1) % MODES.length]
+      : MODES[(i - 1 + MODES.length) % MODES.length]
+  if (next === mode) return
+  mode = next
+  console.log(`[mode] -> ${mode}`)
+  // Re-render every container for the new mode.
+  for (const slot of slots) void pushSlot(slot)
+  void pushTextForMode()
+}
+
 // Notes split at middle C (60). Right hand / treble = >= C4; left hand /
 // bass = < C4. Middle C itself shows on the treble staff with one ledger
 // line below.
@@ -131,6 +154,13 @@ const slots: HalfSlot[] = [
   { containerID: BASS_R_ID,   containerName: 'bass-r',   clef: 'bass',   side: 'right', inFlight: false, dirty: true },
 ]
 
+async function bytesForSlot(slot: HalfSlot): Promise<Uint8Array> {
+  if (mode !== 'free-play') return renderBlankHalfBitmap()
+  const split = splitByClef(held)
+  const halves = await renderStaffHalves(slot.clef, split[slot.clef])
+  return halves[slot.side]
+}
+
 async function pushSlot(slot: HalfSlot): Promise<void> {
   slot.dirty = true
   if (slot.inFlight) return
@@ -138,9 +168,7 @@ async function pushSlot(slot: HalfSlot): Promise<void> {
   try {
     while (slot.dirty) {
       slot.dirty = false
-      const split = splitByClef(held)
-      const halves = await renderStaffHalves(slot.clef, split[slot.clef])
-      const bytes = halves[slot.side]
+      const bytes = await bytesForSlot(slot)
       const ok = await bridge.updateImageRawData(
         new ImageRawDataUpdate({
           containerID: slot.containerID,
@@ -155,24 +183,36 @@ async function pushSlot(slot: HalfSlot): Promise<void> {
   }
 }
 
+function pushTextForMode(): void {
+  const header = `Mode: ${MODE_LABELS[mode]}  (swipe to change)`
+  if (mode === 'free-play') {
+    const heldList =
+      held.size === 0 ? '(none)' : [...held].sort((a, b) => a - b).map(midiNoteName).join(', ')
+    void setText(`${header}\nHeld: ${heldList}`)
+  } else {
+    void setText(`${header}\n(coming soon)`)
+  }
+}
+
 const leftSlot = (clef: Clef): HalfSlot =>
   slots.find(s => s.clef === clef && s.side === 'left')!
 
-// Initial render: paint all four halves once.
+// Initial render: paint all four halves once and seed the text container
+// with the mode header so the user sees something before any MIDI input.
 for (const slot of slots) await pushSlot(slot)
+pushTextForMode()
 
 void startMidi(event => {
   if (event.type === 'on') held.add(event.midi)
   else held.delete(event.midi)
 
-  const last = `${midiNoteName(event.midi)} ${event.type}`
-  const heldList =
-    held.size === 0 ? '(none)' : [...held].sort((a, b) => a - b).map(midiNoteName).join(', ')
-  // Text is flicker-free and fast — it's the snappy part of the feedback.
-  void setText(`Last: ${last}\nHeld: ${heldList}`)
-  // Only the affected staff's left half needs a new bitmap.
-  const clef: Clef = event.midi >= 60 ? 'treble' : 'bass'
-  void pushSlot(leftSlot(clef))
+  // Text feedback runs in every mode (flicker-free / fast).
+  pushTextForMode()
+  // Staff bitmaps only matter in Free play; other modes show all-black.
+  if (mode === 'free-play') {
+    const clef: Clef = event.midi >= 60 ? 'treble' : 'bass'
+    void pushSlot(leftSlot(clef))
+  }
 }).then(() => {
   console.log('[midi] startMidi resolved')
 })
@@ -180,9 +220,21 @@ void startMidi(event => {
 const unsubscribe = bridge.onEvenHubEvent(event => {
   const sysType = event.sysEvent?.eventType ?? null
   const textType = event.textEvent?.eventType ?? null
+  const anyType = sysType ?? textType
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     bridge.shutDownPageContainer(1)
+    return
+  }
+
+  // Swipe up = previous mode, swipe down = next. Scroll events arrive on
+  // textEvent per the SDK convention but we accept either envelope.
+  if (anyType === OsEventTypeList.SCROLL_TOP_EVENT) {
+    cycleMode('up')
+    return
+  }
+  if (anyType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    cycleMode('down')
     return
   }
 
