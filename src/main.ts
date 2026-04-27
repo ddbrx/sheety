@@ -111,24 +111,27 @@ function splitByClef(notes: ReadonlySet<number>): { treble: Set<number>; bass: S
   return { treble, bass }
 }
 
-// Coalesced per-staff pushes. Each clef pushes both of its half-images on
-// every update; the two clef slots run independently so a slow BLE write on
-// one staff doesn't block the other.
-type StaffSlot = {
+// Coalesced per-half pushes. BLE caps updateImageRawData at ~0.5–2 s per
+// call, so we minimise traffic by pushing only what actually changes:
+//   • Right halves are pushed once at startup, then never again (they hold
+//     only static staff lines — noteheads sit in the left half, x≈120 of 280).
+//   • Left halves are pushed only for the staff whose note set changed.
+type HalfSlot = {
+  containerID: number
+  containerName: string
   clef: Clef
-  leftId: number
-  rightId: number
-  leftName: string
-  rightName: string
+  side: 'left' | 'right'
   inFlight: boolean
   dirty: boolean
 }
-const slots: StaffSlot[] = [
-  { clef: 'treble', leftId: TREBLE_L_ID, rightId: TREBLE_R_ID, leftName: 'treble-l', rightName: 'treble-r', inFlight: false, dirty: true },
-  { clef: 'bass', leftId: BASS_L_ID, rightId: BASS_R_ID, leftName: 'bass-l', rightName: 'bass-r', inFlight: false, dirty: true },
+const slots: HalfSlot[] = [
+  { containerID: TREBLE_L_ID, containerName: 'treble-l', clef: 'treble', side: 'left',  inFlight: false, dirty: true },
+  { containerID: TREBLE_R_ID, containerName: 'treble-r', clef: 'treble', side: 'right', inFlight: false, dirty: true },
+  { containerID: BASS_L_ID,   containerName: 'bass-l',   clef: 'bass',   side: 'left',  inFlight: false, dirty: true },
+  { containerID: BASS_R_ID,   containerName: 'bass-r',   clef: 'bass',   side: 'right', inFlight: false, dirty: true },
 ]
 
-async function pushStaff(slot: StaffSlot): Promise<void> {
+async function pushSlot(slot: HalfSlot): Promise<void> {
   slot.dirty = true
   if (slot.inFlight) return
   slot.inFlight = true
@@ -136,34 +139,27 @@ async function pushStaff(slot: StaffSlot): Promise<void> {
     while (slot.dirty) {
       slot.dirty = false
       const split = splitByClef(held)
-      const { left, right } = await renderStaffHalves(slot.clef, split[slot.clef])
-      const okL = await bridge.updateImageRawData(
+      const halves = await renderStaffHalves(slot.clef, split[slot.clef])
+      const bytes = halves[slot.side]
+      const ok = await bridge.updateImageRawData(
         new ImageRawDataUpdate({
-          containerID: slot.leftId,
-          containerName: slot.leftName,
-          imageData: left,
+          containerID: slot.containerID,
+          containerName: slot.containerName,
+          imageData: bytes,
         }),
       )
-      const okR = await bridge.updateImageRawData(
-        new ImageRawDataUpdate({
-          containerID: slot.rightId,
-          containerName: slot.rightName,
-          imageData: right,
-        }),
-      )
-      console.log(`[${slot.clef}] pushed L=${left.length}B/${okL} R=${right.length}B/${okR}`)
+      console.log(`[${slot.containerName}] pushed ${bytes.length}B -> ${ok}`)
     }
   } finally {
     slot.inFlight = false
   }
 }
 
-function pushAll(): void {
-  for (const slot of slots) void pushStaff(slot)
-}
+const leftSlot = (clef: Clef): HalfSlot =>
+  slots.find(s => s.clef === clef && s.side === 'left')!
 
-// Initial render: both staves show their lines + clef glyph.
-for (const slot of slots) await pushStaff(slot)
+// Initial render: paint all four halves once.
+for (const slot of slots) await pushSlot(slot)
 
 void startMidi(event => {
   if (event.type === 'on') held.add(event.midi)
@@ -172,8 +168,11 @@ void startMidi(event => {
   const last = `${midiNoteName(event.midi)} ${event.type}`
   const heldList =
     held.size === 0 ? '(none)' : [...held].sort((a, b) => a - b).map(midiNoteName).join(', ')
+  // Text is flicker-free and fast — it's the snappy part of the feedback.
   void setText(`Last: ${last}\nHeld: ${heldList}`)
-  pushAll()
+  // Only the affected staff's left half needs a new bitmap.
+  const clef: Clef = event.midi >= 60 ? 'treble' : 'bass'
+  void pushSlot(leftSlot(clef))
 }).then(() => {
   console.log('[midi] startMidi resolved')
 })
