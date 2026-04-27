@@ -60,6 +60,12 @@ const STAFF_LEFT = 56
 const STAFF_RIGHT = STAFF_W - 8
 const NOTEHEAD_X = 120
 
+// Window where positioned (sheet-music style) noteheads are laid out, after
+// the clef and before the right edge. Beats map linearly across this range.
+export const NOTE_AREA_LEFT = 80
+export const NOTE_AREA_RIGHT = STAFF_W - 14
+export const NOTE_AREA_WIDTH = NOTE_AREA_RIGHT - NOTE_AREA_LEFT
+
 // Each diatonic step is half a line gap.
 const STEP_PX = STAFF_LINE_GAP / 2
 
@@ -250,6 +256,42 @@ export async function renderBlankHalfBitmap(): Promise<Uint8Array> {
   ctx.fillRect(0, 0, STAFF_HALF_W, STAFF_H)
   cachedBlankBytes = await canvasToPngBytes(c)
   return cachedBlankBytes
+}
+
+// Render a staff with noteheads at custom x-positions (for sheet-music style
+// layout, where notes spread across the staff by beat instead of stacking).
+export type PositionedNote = {
+  midi: number
+  x: number // canvas x, in 0..STAFF_W
+}
+
+export async function renderPositionedHalves(
+  clef: Clef,
+  notes: readonly PositionedNote[],
+): Promise<{ left: Uint8Array; right: Uint8Array }> {
+  const canvas = makeCanvas()
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Failed to acquire 2D context')
+
+  ctx.fillStyle = '#000000'
+  ctx.fillRect(0, 0, STAFF_W, STAFF_H)
+
+  drawStaffLines(ctx)
+  drawConnectingLine(ctx, clef)
+  drawClef(ctx, clef)
+
+  for (const { midi, x } of notes) {
+    const step = midiToStaffStep(midi, clef)
+    const y = staffStepY(step)
+    for (const ls of ledgerLinesFor(step)) drawLedgerLine(ctx, x, ls)
+    drawNotehead(ctx, x, y)
+    if (isBlackKey(midi)) drawSharp(ctx, x - 11, y)
+  }
+
+  return {
+    left: await sliceToPng(canvas, 0, 0, STAFF_HALF_W, STAFF_H),
+    right: await sliceToPng(canvas, STAFF_HALF_W, 0, STAFF_HALF_W, STAFF_H),
+  }
 }
 
 async function sliceToPng(

@@ -8,7 +8,19 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { startMidi, midiNoteName } from './midi'
-import { renderStaffHalves, renderBlankHalfBitmap, STAFF_HALF_W, STAFF_H, type Clef } from './staff'
+import {
+  renderStaffHalves,
+  renderBlankHalfBitmap,
+  renderPositionedHalves,
+  NOTE_AREA_LEFT,
+  NOTE_AREA_WIDTH,
+  STAFF_HALF_W,
+  STAFF_H,
+  type Clef,
+  type PositionedNote,
+} from './staff'
+import { DRILL_SETS } from './exercises'
+import { PIECES } from './pieces'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -110,6 +122,29 @@ const MODE_LABELS: Record<Mode, string> = {
 }
 let mode: Mode = 'free-play'
 
+// Exercises state — which drill within which set, and how far through the
+// current drill's sequence the user has played correctly.
+let drillSetIndex = 0
+let drillIndex = 0
+let drillProgress = 0
+
+function currentDrillSet() {
+  return DRILL_SETS[drillSetIndex]
+}
+function currentDrill() {
+  return currentDrillSet().drills[drillIndex]
+}
+function currentTargetNote(): number | null {
+  const drill = currentDrill()
+  if (drillProgress >= drill.sequence.length) return null
+  return drill.sequence[drillProgress]
+}
+function advanceDrill(): void {
+  // Move to next drill in the set, wrap around.
+  drillIndex = (drillIndex + 1) % currentDrillSet().drills.length
+  drillProgress = 0
+}
+
 function cycleMode(direction: 'up' | 'down'): void {
   const i = MODES.indexOf(mode)
   const next =
@@ -155,10 +190,37 @@ const slots: HalfSlot[] = [
 ]
 
 async function bytesForSlot(slot: HalfSlot): Promise<Uint8Array> {
-  if (mode !== 'free-play') return renderBlankHalfBitmap()
-  const split = splitByClef(held)
-  const halves = await renderStaffHalves(slot.clef, split[slot.clef])
-  return halves[slot.side]
+  if (mode === 'free-play') {
+    const split = splitByClef(held)
+    const halves = await renderStaffHalves(slot.clef, split[slot.clef])
+    return halves[slot.side]
+  }
+  if (mode === 'exercises') {
+    // Show only the current target note on the staff. Lands on whichever
+    // clef matches its pitch; the other clef stays empty.
+    const target = currentTargetNote()
+    const targetSet = new Set<number>()
+    if (target !== null) {
+      const targetClef: Clef = target >= 60 ? 'treble' : 'bass'
+      if (targetClef === slot.clef) targetSet.add(target)
+    }
+    const halves = await renderStaffHalves(slot.clef, targetSet)
+    return halves[slot.side]
+  }
+  if (mode === 'pieces') {
+    const piece = PIECES[0]
+    // Map each event on this staff to a positioned notehead. Beats spread
+    // linearly across the staff's note area.
+    const positioned: PositionedNote[] = []
+    for (const e of piece.events) {
+      if (e.staff !== slot.clef) continue
+      const x = NOTE_AREA_LEFT + (e.beat / piece.totalBeats) * NOTE_AREA_WIDTH
+      for (const midi of e.midis) positioned.push({ midi, x })
+    }
+    const halves = await renderPositionedHalves(slot.clef, positioned)
+    return halves[slot.side]
+  }
+  return renderBlankHalfBitmap()
 }
 
 async function pushSlot(slot: HalfSlot): Promise<void> {
@@ -184,14 +246,29 @@ async function pushSlot(slot: HalfSlot): Promise<void> {
 }
 
 function pushTextForMode(): void {
-  const header = `Mode: ${MODE_LABELS[mode]}  (swipe to change)`
   if (mode === 'free-play') {
     const heldList =
       held.size === 0 ? '(none)' : [...held].sort((a, b) => a - b).map(midiNoteName).join(', ')
-    void setText(`${header}\nHeld: ${heldList}`)
-  } else {
-    void setText(`${header}\n(coming soon)`)
+    void setText(`Mode: Free play  (swipe to change)\nHeld: ${heldList}`)
+    return
   }
+  if (mode === 'exercises') {
+    const set = currentDrillSet()
+    const drill = currentDrill()
+    const target = currentTargetNote()
+    const targetName = target !== null ? midiNoteName(target) : '(done)'
+    const progress = `${Math.min(drillProgress + 1, drill.sequence.length)}/${drill.sequence.length}`
+    void setText(
+      `Exercises – ${set.name}\n${drill.name}: play ${targetName} (${progress})\nclick = skip drill, swipe = mode`,
+    )
+    return
+  }
+  if (mode === 'pieces') {
+    const piece = PIECES[0]
+    void setText(`Pieces – ${piece.name}\n${piece.composer}  (first 4 bars, swipe to change)`)
+    return
+  }
+  void setText(`Mode: ${MODE_LABELS[mode]}  (swipe to change)\n(coming soon)`)
 }
 
 const leftSlot = (clef: Clef): HalfSlot =>
@@ -206,20 +283,37 @@ void startMidi(event => {
   if (event.type === 'on') held.add(event.midi)
   else held.delete(event.midi)
 
-  // Text feedback runs in every mode (flicker-free / fast).
-  pushTextForMode()
-  // Staff bitmaps only matter in Free play; other modes show all-black.
   if (mode === 'free-play') {
+    pushTextForMode()
     const clef: Clef = event.midi >= 60 ? 'treble' : 'bass'
     void pushSlot(leftSlot(clef))
+    return
+  }
+
+  if (mode === 'exercises' && event.type === 'on') {
+    const target = currentTargetNote()
+    if (target !== null && event.midi === target) {
+      // Correct note — advance. Wrap to next drill if we just finished.
+      drillProgress++
+      if (drillProgress >= currentDrill().sequence.length) advanceDrill()
+      pushTextForMode()
+      // Either clef may need updating: previous target and new target can
+      // sit on different staves. Push both left halves to be safe.
+      void pushSlot(leftSlot('treble'))
+      void pushSlot(leftSlot('bass'))
+    }
+    return
   }
 }).then(() => {
   console.log('[midi] startMidi resolved')
 })
 
 const unsubscribe = bridge.onEvenHubEvent(event => {
-  const sysType = event.sysEvent?.eventType ?? null
-  const textType = event.textEvent?.eventType ?? null
+  // Protobuf omits zero-value fields, so CLICK_EVENT (0) arrives as `undefined`
+  // when sysEvent is present at all. `?? 0` distinguishes that from a missing
+  // envelope (which we map to null below).
+  const sysType = event.sysEvent ? (event.sysEvent.eventType ?? 0) : null
+  const textType = event.textEvent ? (event.textEvent.eventType ?? 0) : null
   const anyType = sysType ?? textType
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
@@ -235,6 +329,16 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
   }
   if (anyType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
     cycleMode('down')
+    return
+  }
+
+  // Single click: in Exercises mode, skip to the next drill. Useful when
+  // a scale is too hard or you just want to move on.
+  if (anyType === OsEventTypeList.CLICK_EVENT && mode === 'exercises') {
+    advanceDrill()
+    pushTextForMode()
+    void pushSlot(leftSlot('treble'))
+    void pushSlot(leftSlot('bass'))
     return
   }
 
