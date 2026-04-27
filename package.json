@@ -13,6 +13,7 @@
     "simulate": "evenhub-simulator http://localhost:5173"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
     "@evenrealities/even_hub_sdk": "^0.0.10"
   },
   "devDependencies": {

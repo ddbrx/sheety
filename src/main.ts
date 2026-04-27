@@ -21,6 +21,7 @@ import {
 } from './staff'
 import { DRILL_SETS } from './exercises'
 import { PIECES } from './pieces'
+import { evaluatePerformance, type PlayedEvent } from './evaluator'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -143,6 +144,18 @@ function advanceDrill(): void {
   // Move to next drill in the set, wrap around.
   drillIndex = (drillIndex + 1) % currentDrillSet().drills.length
   drillProgress = 0
+  resetHistory()
+}
+
+// Played-notes history for evaluation. Tracked only in Exercises and Pieces
+// modes; reset on mode change and on drill skip so each evaluation reflects
+// just the current attempt.
+let history: PlayedEvent[] = []
+let sessionStart = Date.now()
+
+function resetHistory(): void {
+  history = []
+  sessionStart = Date.now()
 }
 
 function cycleMode(direction: 'up' | 'down'): void {
@@ -154,6 +167,7 @@ function cycleMode(direction: 'up' | 'down'): void {
   if (next === mode) return
   mode = next
   console.log(`[mode] -> ${mode}`)
+  resetHistory()
   // Re-render every container for the new mode.
   for (const slot of slots) void pushSlot(slot)
   void pushTextForMode()
@@ -290,23 +304,57 @@ void startMidi(event => {
     return
   }
 
+  // In Exercises and Pieces, every key event goes into the history that
+  // gets evaluated on double-click.
+  if (mode === 'exercises' || mode === 'pieces') {
+    history.push({ midi: event.midi, type: event.type, t: Date.now() - sessionStart })
+  }
+
   if (mode === 'exercises' && event.type === 'on') {
     const target = currentTargetNote()
     if (target !== null && event.midi === target) {
-      // Correct note — advance. Wrap to next drill if we just finished.
+      // Correct note — advance. If that was the last note of the drill, kick
+      // off automatic evaluation; the user clicks to move on to the next
+      // drill (click handler calls advanceDrill, which resets history).
       drillProgress++
-      if (drillProgress >= currentDrill().sequence.length) advanceDrill()
-      pushTextForMode()
+      const drillDone = drillProgress >= currentDrill().sequence.length
       // Either clef may need updating: previous target and new target can
       // sit on different staves. Push both left halves to be safe.
       void pushSlot(leftSlot('treble'))
       void pushSlot(leftSlot('bass'))
+      if (drillDone) {
+        // Don't call pushTextForMode — let triggerEvaluation own the text
+        // (Evaluating... → result). Don't advance until the user clicks.
+        void triggerEvaluation()
+      } else {
+        pushTextForMode()
+      }
     }
     return
   }
 }).then(() => {
   console.log('[midi] startMidi resolved')
 })
+
+async function triggerEvaluation(): Promise<void> {
+  if (mode !== 'exercises' && mode !== 'pieces') return
+  if (history.length === 0) {
+    void setText('Evaluation: nothing played yet')
+    return
+  }
+  void setText('Evaluating...')
+  try {
+    const result =
+      mode === 'exercises'
+        ? await evaluatePerformance({ mode, played: [...history], expected: [...currentDrill().sequence] })
+        : await evaluatePerformance({ mode, played: [...history], expected: [...PIECES[0].events] })
+    void setText(result)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[eval]', err)
+    void setText(`Eval failed: ${msg}`)
+  }
+}
 
 const unsubscribe = bridge.onEvenHubEvent(event => {
   // Protobuf omits zero-value fields, so CLICK_EVENT (0) arrives as `undefined`
@@ -317,7 +365,14 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
   const anyType = sysType ?? textType
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    bridge.shutDownPageContainer(1)
+    // In Exercises / Pieces, double-click triggers Claude evaluation;
+    // double-click only exits in Free play. To exit from a tracking mode,
+    // swipe back to Free play first.
+    if (mode === 'exercises' || mode === 'pieces') {
+      void triggerEvaluation()
+    } else {
+      bridge.shutDownPageContainer(1)
+    }
     return
   }
 
